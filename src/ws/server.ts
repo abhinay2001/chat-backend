@@ -118,6 +118,47 @@ export function setupWebSocketServer(server: Server) {
         });
         return;
       }
+
+      if (data.type === "read") {
+        if (!ws.rooms?.has(data.roomId)) {
+          ws.send(JSON.stringify({ type: "error", message: "join the room first" }));
+          return;
+        }
+
+        // only move the read pointer forward, never backward
+        await pool.query(
+          `insert into read_receipts (room_id, user_id, last_read_message_id)
+           values ($1, $2, $3)
+           on conflict (room_id, user_id)
+           do update set last_read_message_id = $3, updated_at = now()
+           where read_receipts.last_read_message_id is null
+              or read_receipts.last_read_message_id < $3`,
+          [data.roomId, ws.userId, data.messageId]
+        );
+
+        broadcastToRoom(data.roomId, {
+          type: "read",
+          roomId: data.roomId,
+          userId: ws.userId,
+          messageId: data.messageId,
+        });
+        return;
+      }
+
+      if (data.type === "unread") {
+        const result = await pool.query(
+          `select count(*)::int as count
+           from messages m
+           left join read_receipts r
+             on r.room_id = m.room_id and r.user_id = $2
+           where m.room_id = $1
+             and (r.last_read_message_id is null or m.id > r.last_read_message_id)`,
+          [data.roomId, ws.userId]
+        );
+
+        ws.send(JSON.stringify({ type: "unread", roomId: data.roomId, count: result.rows[0].count }));
+        return;
+      }
     });
 
     ws.on("close", () => {
