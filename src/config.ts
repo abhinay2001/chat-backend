@@ -4,4 +4,5 @@ export const config = {
   jwtExpiresIn: "7d" as const,
   databaseUrl: process.env.DATABASE_URL ?? "postgresql://chat:chat@localhost:5432/chat",
   kafkaBrokers: (process.env.KAFKA_BROKERS ?? "localhost:19092").split(","),
+  redisUrl: process.env.REDIS_URL ?? "redis://localhost:6379",
 };

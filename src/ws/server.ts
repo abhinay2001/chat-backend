@@ -4,13 +4,16 @@ import jwt from "jsonwebtoken";
 import { config } from "../config.js";
 import { pool } from "../db.js";
 import { publishMessage } from "../kafka/producer.js";
+import { subscribeToBroadcasts } from "../redis/pubsub.js";
+import { addPresence, removePresence, listPresence } from "../redis/presence.js";
+import { isRateLimited } from "../redis/rateLimit.js";
 
 interface AuthedSocket extends WebSocket {
   userId?: string;
   rooms?: Set<string>;
 }
 
-// roomId -> sockets currently joined to that room
+// roomId -> sockets currently joined to that room, on THIS instance only
 const roomClients = new Map<string, Set<AuthedSocket>>();
 
 export function broadcastToRoom(roomId: string, payload: unknown) {
@@ -33,14 +36,21 @@ function joinRoom(socket: AuthedSocket, roomId: string) {
   roomClients.get(roomId)!.add(socket);
 }
 
-function leaveAllRooms(socket: AuthedSocket) {
-  if (!socket.rooms) return;
+async function leaveAllRooms(socket: AuthedSocket) {
+  if (!socket.rooms || !socket.userId) return;
+
   for (const roomId of socket.rooms) {
     roomClients.get(roomId)?.delete(socket);
+    await removePresence(roomId, socket.userId);
+    broadcastToRoom(roomId, { type: "presence", event: "leave", userId: socket.userId });
   }
 }
 
 export function setupWebSocketServer(server: Server) {
+  // redis pub/sub delivers every published message to every instance, so
+  // each instance just broadcasts to whichever clients it has locally
+  subscribeToBroadcasts((roomId, payload) => broadcastToRoom(roomId, payload));
+
   const wss = new WebSocketServer({ server, path: "/ws" });
 
   wss.on("connection", (ws: AuthedSocket, req) => {
@@ -77,8 +87,13 @@ export function setupWebSocketServer(server: Server) {
           ws.send(JSON.stringify({ type: "error", message: "not a member of this room" }));
           return;
         }
+
         joinRoom(ws, data.roomId);
-        ws.send(JSON.stringify({ type: "joined", roomId: data.roomId }));
+        await addPresence(data.roomId, ws.userId!);
+
+        const online = await listPresence(data.roomId);
+        ws.send(JSON.stringify({ type: "joined", roomId: data.roomId, online }));
+        broadcastToRoom(data.roomId, { type: "presence", event: "join", userId: ws.userId });
         return;
       }
 
@@ -90,6 +105,12 @@ export function setupWebSocketServer(server: Server) {
         if (typeof data.content !== "string" || data.content.trim().length === 0) {
           return;
         }
+
+        if (await isRateLimited(ws.userId!)) {
+          ws.send(JSON.stringify({ type: "error", message: "you're sending messages too fast" }));
+          return;
+        }
+
         await publishMessage(data.roomId, {
           roomId: data.roomId,
           userId: ws.userId,

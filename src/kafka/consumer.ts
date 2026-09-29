@@ -1,7 +1,7 @@
 import { kafka } from "./client.js";
 import { TOPIC } from "./producer.js";
 import { pool } from "../db.js";
-import { broadcastToRoom } from "../ws/server.js";
+import { publishToRoom } from "../redis/pubsub.js";
 
 const consumer = kafka.consumer({ groupId: "chat-backend-workers" });
 
@@ -22,7 +22,10 @@ export async function startConsumer() {
         [roomId, userId, content]
       );
 
-      broadcastToRoom(roomId, {
+      // publish to redis instead of broadcasting directly - that way every
+      // backend instance hears about the message, not just whichever one's
+      // kafka consumer happened to pick it up
+      await publishToRoom(roomId, {
         type: "message",
         roomId,
         userId,
